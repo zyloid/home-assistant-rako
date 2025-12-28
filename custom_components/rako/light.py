@@ -79,6 +79,7 @@ class RakoLight(LightEntity):
 
     _attr_supported_color_modes = {ColorMode.BRIGHTNESS}
     _attr_color_mode = ColorMode.BRIGHTNESS
+    _attr_assumed_state = True  # State is unreliable due to manual control
 
     def __init__(self, bridge: RakoBridge, light: python_rako.Light) -> None:
         """Initialize a RakoLight."""
