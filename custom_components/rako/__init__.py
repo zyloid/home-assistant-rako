@@ -1,52 +1,60 @@
 """The Rako integration."""
-
 from __future__ import annotations
 
+import logging
+
+from homeassistant.components.light import DOMAIN as LIGHT_DOMAIN
+from homeassistant.components.scene import DOMAIN as SCENE_DOMAIN
 from homeassistant.config_entries import ConfigEntry
-from homeassistant.const import CONF_HOST, CONF_NAME, Platform
+from homeassistant.const import CONF_HOST, CONF_MAC, CONF_NAME, CONF_PORT
 from homeassistant.core import HomeAssistant
 from homeassistant.helpers import device_registry as dr
+
+from .bridge import RakoBridge
 from .const import DOMAIN
-from .hub_client import HubClient
 from .model import RakoDomainEntryData
 
-PLATFORMS: list[Platform] = [Platform.LIGHT, Platform.SELECT, Platform.COVER]
-
-type RakoConfigEntry = ConfigEntry[RakoDomainEntryData]
+_LOGGER = logging.getLogger(__name__)
 
 
-async def async_setup_entry(hass: HomeAssistant, entry: RakoConfigEntry) -> bool:
+async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Set up Rako from a config entry."""
-    hub_client = HubClient(
-        name=entry.data[CONF_NAME],
+    rako_bridge = RakoBridge(
         host=entry.data[CONF_HOST],
+        port=entry.data[CONF_PORT],
+        name=entry.data[CONF_NAME],
+        mac=entry.data[CONF_MAC],
         entry_id=entry.entry_id,
-        hass=hass
+        hass=hass,
     )
-
-    hub_info = await hub_client.get_hub_status()
 
     device_registry = dr.async_get(hass)
     device_registry.async_get_or_create(
         config_entry_id=entry.entry_id,
-        connections={(dr.CONNECTION_NETWORK_MAC, hub_info.mac_address)},
-        identifiers={(DOMAIN, hub_info.id)},
+        connections={(dr.CONNECTION_NETWORK_MAC, entry.data[CONF_MAC])},
+        identifiers={(DOMAIN, entry.data[CONF_MAC])},
         manufacturer="Rako",
-        name="Hub"
+        name=entry.data[CONF_NAME],
     )
 
+    hass.data.setdefault(DOMAIN, {})
     rako_domain_entry_data: RakoDomainEntryData = {
-        "hub_id": hub_info.id,
-        "hub_client": hub_client
+        "rako_bridge_client": rako_bridge,
     }
+    hass.data[DOMAIN][rako_bridge.mac] = rako_domain_entry_data
 
-    entry.runtime_data = rako_domain_entry_data
-
-    await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
+    await hass.config_entries.async_forward_entry_setups(entry, [LIGHT_DOMAIN, SCENE_DOMAIN])
 
     return True
 
 
-async def async_unload_entry(hass: HomeAssistant, entry: RakoConfigEntry) -> bool:
+async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Unload a config entry."""
-    return await hass.config_entries.async_unload_platforms(entry, PLATFORMS)
+    unload_ok = await hass.config_entries.async_unload_platforms(entry, [LIGHT_DOMAIN, SCENE_DOMAIN])
+
+    if unload_ok:
+        del hass.data[DOMAIN][entry.unique_id]
+        if not hass.data[DOMAIN]:
+            del hass.data[DOMAIN]
+
+    return unload_ok

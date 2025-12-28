@@ -1,73 +1,100 @@
-"""Config flow for Rako integration."""
-
+"""Config flow for Rako."""
 from __future__ import annotations
 
 import asyncio
 import logging
 from typing import Any
 
+from python_rako import BridgeDescription, discover_bridge
+from python_rako.bridge import Bridge
+from python_rako.const import RAKO_BRIDGE_DEFAULT_PORT
+from python_rako.exceptions import RakoBridgeError
+from python_rako.model import BridgeInfo
 import voluptuous as vol
 
-from homeassistant.config_entries import ConfigFlow, ConfigFlowResult
-from homeassistant.const import CONF_HOST, CONF_NAME
-from homeassistant.core import HomeAssistant
-from homeassistant.exceptions import HomeAssistantError
-from rakopy.hub import Hub
-from .const import DOMAIN, TIMEOUT
+from homeassistant.config_entries import ConfigFlow
+from homeassistant.const import CONF_BASE, CONF_HOST, CONF_MAC, CONF_NAME, CONF_PORT
+from homeassistant.data_entry_flow import FlowResult
+from homeassistant.helpers.aiohttp_client import async_get_clientsession
+
+from .const import DOMAIN
 
 _LOGGER = logging.getLogger(__name__)
 
-STEP_USER_DATA_SCHEMA = vol.Schema(
-    {
-        vol.Required(CONF_NAME): str,
-        vol.Required(CONF_HOST): str
-    }
-)
 
-
-async def validate_input(hass: HomeAssistant, data: dict[str, Any]) -> dict[str, Any]:
-    """Validate the user input allows us to connect.
-
-    Data has the keys from STEP_USER_DATA_SCHEMA with values provided by the user.
-    """
-    hub = Hub(data[CONF_NAME], data[CONF_HOST])
-    try:
-        hub_info = await asyncio.wait_for(
-            hub.get_hub_status(), timeout=TIMEOUT
-        )
-    except:
-        raise CannotConnect
-
-    return {"title": "Rako Hub", "hub_id": hub_info.id}
-
-
-class ConfigFlow(ConfigFlow, domain=DOMAIN):
-    """Handle a config flow for Rako."""
+class RakoConfigFlow(ConfigFlow, domain=DOMAIN):
+    """RakoConfigFlow."""
 
     VERSION = 1
+    rako_timeout = 3.0
 
     async def async_step_user(
         self, user_input: dict[str, Any] | None = None
-    ) -> ConfigFlowResult:
-        """Handle the initial step."""
-        errors: dict[str, str] = {}
-        if user_input is not None:
+    ) -> FlowResult:
+        """Handle a flow initiated by the user."""
+        bridge_desc: BridgeDescription = {}
+        if user_input is None:
             try:
-                info = await validate_input(self.hass, user_input)
-                await self.async_set_unique_id(f"Rako_Hub_{info["hub_id"]}")
-                self._abort_if_unique_id_configured()
-            except CannotConnect:
-                errors["base"] = "cannot_connect"
-            except Exception:
-                _LOGGER.exception("Unexpected exception")
-                errors["base"] = "unknown"
-            else:
-                return self.async_create_entry(title=info["title"], data=user_input)
+                bridge_desc = await asyncio.wait_for(
+                    discover_bridge(), timeout=self.rako_timeout
+                )
+            except (asyncio.TimeoutError, ValueError) as ex:
+                _LOGGER.warning("Couldn't auto discover Rako bridge %s", ex)
 
-        return self.async_show_form(
-            step_id="user", data_schema=STEP_USER_DATA_SCHEMA, errors=errors
+            if bridge_desc:
+                return self._show_setup_form(bridge_desc=bridge_desc)
+            return self._show_setup_form(
+                bridge_desc=bridge_desc, errors={CONF_BASE: "no_devices_found"}
+            )
+
+        bridge_desc = {
+            "host": user_input[CONF_HOST],
+            "port": user_input[CONF_PORT],
+            "mac": user_input[CONF_MAC],
+            "name": user_input[CONF_NAME]
+            if user_input.get(CONF_NAME)
+            else user_input[CONF_MAC],
+        }
+        try:
+            # just check we can connect using the given data
+            await self._get_bridge_info(bridge_desc)
+        except (RakoBridgeError, asyncio.TimeoutError):
+            return self._show_setup_form(
+                bridge_desc=bridge_desc, errors={CONF_BASE: "cannot_connect"}
+            )
+
+        await self.async_set_unique_id(
+            unique_id=user_input[CONF_MAC], raise_on_progress=True
+        )
+        self._abort_if_unique_id_configured()
+
+        return self.async_create_entry(
+            title=f"Rako Bridge ({bridge_desc['name']})",
+            data=bridge_desc,
         )
 
+    def _show_setup_form(
+        self,
+        bridge_desc: BridgeDescription,
+        errors: dict[str, str] | None = None,
+    ) -> FlowResult:
+        """Show the setup form to the user."""
+        return self.async_show_form(
+            step_id="user",
+            data_schema=vol.Schema(
+                {
+                    vol.Required(CONF_HOST, default=bridge_desc.get("host")): str,
+                    vol.Required(CONF_PORT, default=RAKO_BRIDGE_DEFAULT_PORT): int,
+                    vol.Optional(CONF_NAME, default=bridge_desc.get("name")): str,
+                    vol.Required(CONF_MAC, default=bridge_desc.get("mac")): str,
+                }
+            ),
+            errors=errors or {},
+        )
 
-class CannotConnect(HomeAssistantError):
-    """Error to indicate we cannot connect."""
+    async def _get_bridge_info(self, bridge_desc: BridgeDescription) -> BridgeInfo:
+        session = async_get_clientsession(self.hass)
+        bridge = Bridge(**bridge_desc)
+        return await asyncio.wait_for(
+            bridge.get_info(session), timeout=self.rako_timeout
+        )
