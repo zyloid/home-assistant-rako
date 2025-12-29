@@ -109,9 +109,19 @@ class RakoLight(LightEntity):
         return self._available
 
     @property
-    def brightness(self) -> int:
-        """Return the brightness of the light."""
-        return self._brightness
+    def brightness(self) -> int | float:
+        """Return the brightness of the light.
+
+        Returns a float with tiny random variation to force Home Assistant
+        scenes to always apply commands (otherwise scenes skip lights they
+        think are already in the correct state, which is wrong for Rako since
+        manual changes aren't tracked).
+        """
+        # Add tiny variation (0.0001-0.0009) to force scene updates
+        # This makes the reproduce_state equality check always fail
+        import time
+        variation = (int(time.time() * 10000) % 9 + 1) / 10000.0
+        return self._brightness + variation if self._brightness > 0 else 0
 
     @property
     def is_on(self) -> bool:
